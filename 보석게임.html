@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>보석 맞추기</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 30%, #2b2350, #0c0a1a 70%);
+    font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; color: #f3eefc;
+  }
+  .wrap { display: flex; gap: 20px; align-items: flex-start; padding: 16px; flex-wrap: wrap; justify-content: center; }
+  .panel {
+    width: 200px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 12px;
+  }
+  h1 { margin: 0; font-size: 22px; letter-spacing: 1px; color: #ffd86b; text-shadow: 0 0 10px rgba(255,200,80,.5); }
+  .label { font-size: 12px; opacity: .7; }
+  .value { font-size: 26px; font-weight: bold; }
+  .bar { height: 10px; background: rgba(255,255,255,.12); border-radius: 5px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, #6bf, #c6f); transition: width .3s; }
+  button {
+    padding: 10px; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer;
+    background: linear-gradient(#7a5cff, #5233d6); color: white; font-family: inherit;
+  }
+  button:hover { filter: brightness(1.15); }
+  button.sub { background: rgba(255,255,255,.14); }
+  canvas {
+    border-radius: 12px; border: 2px solid rgba(255,255,255,.2); touch-action: none;
+    box-shadow: 0 10px 40px rgba(0,0,0,.6); max-width: calc(100vw - 32px); height: auto;
+  }
+  .help { font-size: 12px; line-height: 1.6; opacity: .75; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="c" width="560" height="560"></canvas>
+  <div class="panel">
+    <h1>💎 보석 맞추기</h1>
+    <div><div class="label">점수</div><div class="value" id="score">0</div></div>
+    <div><div class="label">레벨 <span id="level">1</span></div><div class="bar"><div id="prog"></div></div></div>
+    <div><div class="label">남은 시간</div><div class="value" id="time">90</div></div>
+    <div><div class="label">최고 점수</div><div class="value" id="best" style="font-size:18px">0</div></div>
+    <button id="hintBtn" class="sub">💡 힌트</button>
+    <button id="newBtn">새 게임</button>
+    <div class="help">같은 보석 3개 이상을 가로·세로로 맞추세요.<br>클릭 또는 드래그로 이웃한 보석을 바꿉니다.<br>4개 이상, 연쇄 콤보는 점수와 시간 보너스!</div>
+  </div>
+</div>
+<script>
+const N = 8, CELL = 70, TYPES = 7, START_TIME = 90;
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const COLORS = [
+  ['#ff4d5e', '#9e0f22'], // 빨강 사각
+  ['#ffffff', '#8a93a8'], // 흰 원
+  ['#ffe14d', '#b38900'], // 노랑 다이아
+  ['#3ee07a', '#0b7a35'], // 초록 팔각
+  ['#ff9a3c', '#b04a00'], // 주황 육각
+  ['#d26bff', '#6b16a3'], // 보라 삼각
+  ['#4db5ff', '#0b4fa0'], // 파랑 오각
+];
+
+let board, score, level, timeLeft, busy, selected, particles, popups, hintCell, gameOver, best = 0;
+try { best = +localStorage.getItem('gemBest') || 0; } catch (e) {}
+
+const rnd = n => Math.floor(Math.random() * n);
+const sleepAnim = (ms, fn) => new Promise(res => {
+  const t0 = performance.now();
+  (function step(now) {
+    const p = Math.min(1, (now - t0) / ms);
+    fn && fn(p);
+    if (p < 1) requestAnimationFrame(step); else res();
+  })(t0);
+});
+const ease = p => 1 - Math.pow(1 - p, 3);
+
+function newGem(t, r, c) { return { t, x: c, y: r, s: 1, a: 1 }; }
+
+function newBoard() {
+  board = [];
+  for (let r = 0; r < N; r++) {
+    board.push([]);
+    for (let c = 0; c < N; c++) {
+      let t;
+      do { t = rnd(TYPES); } while (
+        (c >= 2 && board[r][c-1].t === t && board[r][c-2].t === t) ||
+        (r >= 2 && board[r-1][c].t === t && board[r-2][c].t === t));
+      board[r].push(newGem(t, r, c));
+    }
+  }
+  if (!findMove()) newBoard();
+}
+
+function findMatches() {
+  const set = new Set(), groups = [];
+  for (let r = 0; r < N; r++) for (let c = 0; c < N;) {
+    let e = c; while (e + 1 < N && board[r][e+1].t === board[r][c].t) e++;
+    if (e - c >= 2) { const g = []; for (let k = c; k <= e; k++) { set.add(r*N+k); g.push(r*N+k); } groups.push(g); }
+    c = e + 1;
+  }
+  for (let c = 0; c < N; c++) for (let r = 0; r < N;) {
+    let e = r; while (e + 1 < N && board[e+1][c].t === board[r][c].t) e++;
+    if (e - r >= 2) { const g = []; for (let k = r; k <= e; k++) { set.add(k*N+c); g.push(k*N+c); } groups.push(g); }
+    r = e + 1;
+  }
+  return { set, groups };
+}
+
+function swapData(a, b) {
+  const t = board[a.r][a.c]; board[a.r][a.c] = board[b.r][b.c]; board[b.r][b.c] = t;
+}
+
+function findMove() {
+  const dirs = [[0,1],[1,0]];
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) for (const [dr, dc] of dirs) {
+    const r2 = r + dr, c2 = c + dc; if (r2 >= N || c2 >= N) continue;
+    swapData({r,c}, {r:r2,c:c2});
+    const ok = findMatches().set.size > 0;
+    swapData({r,c}, {r:r2,c:c2});
+    if (ok) return [{r,c},{r:r2,c:c2}];
+  }
+  return null;
+}
+
+async function trySwap(a, b) {
+  if (busy || gameOver) return;
+  busy = true; selected = null; hintCell = null;
+  const ga = board[a.r][a.c], gb = board[b.r][b.c];
+  await animSwap(ga, gb, a, b);
+  swapData(a, b);
+  if (findMatches().set.size === 0) {
+    await animSwap(ga, gb, b, a);
+    swapData(a, b);
+  } else {
+    await resolve();
+  }
+  busy = false;
+  if (timeLeft <= 0) endGame();
+}
+
+function animSwap(ga, gb, a, b) {
+  return sleepAnim(180, p => {
+    const e = ease(p);
+    ga.x = a.c + (b.c - a.c) * e; ga.y = a.r + (b.r - a.r) * e;
+    gb.x = b.c + (a.c - b.c) * e; gb.y = b.r + (a.r - b.r) * e;
+  });
+}
+
+async function resolve() {
+  let combo = 0;
+  while (true) {
+    const { set, groups } = findMatches();
+    if (set.size === 0) break;
+    combo++;
+    let gained = 0;
+    for (const g of groups) gained += 10 * g.length + (g.length >= 4 ? 30 * (g.length - 3) : 0);
+    gained *= combo;
+    score += gained;
+    const bonusTime = groups.filter(g => g.length >= 4).length * 2 + (combo >= 3 ? 1 : 0);
+    timeLeft = Math.min(START_TIME, timeLeft + bonusTime);
+    // 팝업 위치: 매치 중심
+    let sr = 0, sc = 0; set.forEach(k => { sr += Math.floor(k / N); sc += k % N; });
+    popups.push({ x: (sc / set.size + .5) * CELL, y: (sr / set.size + .5) * CELL, text: '+' + gained + (combo > 1 ? `  x${combo}` : ''), life: 1 });
+    set.forEach(k => {
+      const r = Math.floor(k / N), c = k % N;
+      burst((c + .5) * CELL, (r + .5) * CELL, COLORS[board[r][c].t][0]);
+    });
+    const dying = [...set].map(k => board[Math.floor(k / N)][k % N]);
+    await sleepAnim(200, p => dying.forEach(g => { g.s = 1 + .3 * p - 1.3 * p * p; g.a = 1 - p; }));
+    set.forEach(k => { board[Math.floor(k / N)][k % N] = null; });
+    // 낙하
+    const moving = [];
+    for (let c = 0; c < N; c++) {
+      let w = N - 1;
+      for (let r = N - 1; r >= 0; r--) if (board[r][c]) {
+        const g = board[r][c]; board[r][c] = null; board[w][c] = g;
+        if (w !== r) moving.push({ g, from: g.y, to: w });
+        w--;
+      }
+      for (let k = 0; w >= 0; w--, k++) {
+        const g = newGem(rnd(TYPES), -1 - k, c);
+        board[w][c] = g; moving.push({ g, from: g.y, to: w });
+      }
+    }
+    const dur = 120 + 45 * Math.max(...moving.map(m => m.to - m.from), 1);
+    await sleepAnim(dur, p => {
+      const e = p * p * (3 - 2 * p);
+      moving.forEach(m => { m.g.y = m.from + (m.to - m.from) * e; });
+    });
+    updateUI();
+  }
+  if (!findMove()) {
+    popups.push({ x: N * CELL / 2, y: N * CELL / 2, text: '섞는 중...', life: 1.5 });
+    await shuffle();
+  }
+}
+
+async function shuffle() {
+  const all = board.flat();
+  await sleepAnim(250, p => all.forEach(g => g.a = 1 - p));
+  do {
+    const ts = all.map(g => g.t).sort(() => Math.random() - .5);
+    all.forEach((g, i) => g.t = ts[i]);
+  } while (findMatches().set.size > 0 || !findMove());
+  await sleepAnim(250, p => all.forEach(g => g.a = p));
+}
+
+function burst(x, y, color) {
+  for (let i = 0; i < 8; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 1.5 + Math.random() * 3.5;
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 1, life: 1, color, size: 2 + Math.random() * 3 });
+  }
+}
+
+// ---------- 그리기 ----------
+function shapePath(t, R) {
+  ctx.beginPath();
+  const poly = (n, rot, rad = R) => {
+    for (let i = 0; i < n; i++) {
+      const a = rot + i * Math.PI * 2 / n;
+      i ? ctx.lineTo(Math.cos(a) * rad, Math.sin(a) * rad) : ctx.moveTo(Math.cos(a) * rad, Math.sin(a) * rad);
+    }
+    ctx.closePath();
+  };
+  switch (t) {
+    case 0: { const s = R * .82; ctx.roundRect(-s, -s, s * 2, s * 2, R * .18); break; }
+    case 1: ctx.arc(0, 0, R * .9, 0, Math.PI * 2); break;
+    case 2: poly(4, -Math.PI / 2, R); break;
+    case 3: poly(8, Math.PI / 8, R * .95); break;
+    case 4: poly(6, 0, R * .95); break;
+    case 5: ctx.moveTo(0, -R); ctx.lineTo(R * .95, R * .75); ctx.lineTo(-R * .95, R * .75); ctx.closePath(); break;
+    case 6: poly(5, -Math.PI / 2, R); break;
+  }
+}
+
+function drawGem(g, highlight) {
+  const R = CELL * .38;
+  ctx.save();
+  ctx.translate((g.x + .5) * CELL, (g.y + .5) * CELL);
+  const pulse = highlight ? 1 + Math.sin(performance.now() / 120) * .08 : 1;
+  ctx.scale(g.s * pulse, g.s * pulse);
+  ctx.globalAlpha = Math.max(0, g.a);
+  const [light, dark] = COLORS[g.t];
+  ctx.shadowColor = light; ctx.shadowBlur = highlight ? 22 : 8;
+  shapePath(g.t, R);
+  const grad = ctx.createRadialGradient(-R * .35, -R * .4, R * .1, 0, 0, R * 1.2);
+  grad.addColorStop(0, '#fff'); grad.addColorStop(.25, light); grad.addColorStop(1, dark);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.stroke();
+  // 안쪽 면(컷팅 느낌)
+  ctx.save(); ctx.scale(.55, .55); shapePath(g.t, R);
+  ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2; ctx.stroke(); ctx.restore();
+  // 반짝임
+  ctx.beginPath(); ctx.ellipse(-R * .3, -R * .38, R * .22, R * .1, -.6, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.fill();
+  ctx.restore();
+}
+
+function render() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    ctx.fillStyle = (r + c) % 2 ? 'rgba(255,255,255,.05)' : 'rgba(255,255,255,.1)';
+    ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+  }
+  if (selected) {
+    ctx.strokeStyle = '#ffd86b'; ctx.lineWidth = 3;
+    ctx.strokeRect(selected.c * CELL + 3, selected.r * CELL + 3, CELL - 6, CELL - 6);
+  }
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, cv.width, cv.height); ctx.clip();
+  for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+    const g = board[r][c]; if (!g) continue;
+    const hl = (selected && selected.r === r && selected.c === c) ||
+               (hintCell && hintCell.some(h => h.r === r && h.c === c));
+    drawGem(g, hl);
+  }
+  ctx.restore();
+  particles = particles.filter(p => p.life > 0);
+  for (const p of particles) {
+    p.x += p.vx; p.y += p.vy; p.vy += .12; p.life -= .025;
+    ctx.globalAlpha = Math.max(0, p.life); ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  popups = popups.filter(p => p.life > 0);
+  ctx.textAlign = 'center'; ctx.font = 'bold 26px "Malgun Gothic", sans-serif';
+  for (const p of popups) {
+    p.y -= .7; p.life -= .015;
+    ctx.globalAlpha = Math.min(1, p.life * 2);
+    ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.strokeText(p.text, p.x, p.y);
+    ctx.fillStyle = '#ffe680'; ctx.fillText(p.text, p.x, p.y);
+  }
+  ctx.globalAlpha = 1;
+  if (gameOver) {
+    ctx.fillStyle = 'rgba(10,8,25,.75)'; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.fillStyle = '#ffd86b'; ctx.font = 'bold 48px "Malgun Gothic", sans-serif';
+    ctx.fillText('시간 종료!', cv.width / 2, cv.height / 2 - 30);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 28px "Malgun Gothic", sans-serif';
+    ctx.fillText('점수: ' + score, cv.width / 2, cv.height / 2 + 20);
+    ctx.font = '18px "Malgun Gothic", sans-serif';
+    ctx.fillText('클릭해서 다시 시작', cv.width / 2, cv.height / 2 + 65);
+  }
+  requestAnimationFrame(render);
+}
+
+// ---------- UI / 진행 ----------
+const levelGoal = l => 1000 * l * (l + 1) / 2;
+function updateUI() {
+  while (score >= levelGoal(level)) {
+    level++;
+    timeLeft = Math.min(START_TIME, timeLeft + 15);
+    popups.push({ x: N * CELL / 2, y: N * CELL / 2 + 40, text: `레벨 업! Lv.${level} (+15초)`, life: 1.6 });
+  }
+  const prev = levelGoal(level - 1), goal = levelGoal(level);
+  document.getElementById('score').textContent = score.toLocaleString();
+  document.getElementById('level').textContent = level;
+  document.getElementById('prog').style.width = ((score - prev) / (goal - prev) * 100) + '%';
+  document.getElementById('time').textContent = Math.ceil(timeLeft);
+  document.getElementById('time').style.color = timeLeft <= 10 ? '#ff6b7a' : '';
+  document.getElementById('best').textContent = best.toLocaleString();
+}
+
+function endGame() {
+  gameOver = true; selected = null; hintCell = null;
+  if (score > best) { best = score; try { localStorage.setItem('gemBest', best); } catch (e) {} }
+  updateUI();
+}
+
+function startGame() {
+  score = 0; level = 1; timeLeft = START_TIME; busy = false; selected = null;
+  particles = []; popups = []; hintCell = null; gameOver = false;
+  newBoard(); updateUI();
+}
+
+setInterval(() => {
+  if (gameOver) return;
+  timeLeft = Math.max(0, timeLeft - 1);
+  updateUI();
+  if (timeLeft <= 0 && !busy) endGame();
+}, 1000);
+
+// ---------- 입력 ----------
+let dragStart = null;
+function cellAt(e) {
+  const rect = cv.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * cv.width / rect.width, y = (e.clientY - rect.top) * cv.height / rect.height;
+  return { r: Math.floor(y / CELL), c: Math.floor(x / CELL), x, y };
+}
+cv.addEventListener('pointerdown', e => {
+  if (gameOver) { startGame(); return; }
+  if (busy) return;
+  const p = cellAt(e);
+  if (p.r < 0 || p.r >= N || p.c < 0 || p.c >= N) return;
+  if (selected && Math.abs(selected.r - p.r) + Math.abs(selected.c - p.c) === 1) {
+    trySwap(selected, { r: p.r, c: p.c }); dragStart = null; return;
+  }
+  selected = { r: p.r, c: p.c };
+  dragStart = p;
+});
+cv.addEventListener('pointermove', e => {
+  if (!dragStart || busy) return;
+  const p = cellAt(e), dx = p.x - dragStart.x, dy = p.y - dragStart.y;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < CELL * .4) return;
+  const t = Math.abs(dx) > Math.abs(dy)
+    ? { r: dragStart.r, c: dragStart.c + Math.sign(dx) }
+    : { r: dragStart.r + Math.sign(dy), c: dragStart.c };
+  const s = { r: dragStart.r, c: dragStart.c };
+  dragStart = null;
+  if (t.r >= 0 && t.r < N && t.c >= 0 && t.c < N) trySwap(s, t);
+});
+window.addEventListener('pointerup', () => { dragStart = null; });
+
+document.getElementById('hintBtn').onclick = () => {
+  if (busy || gameOver) return;
+  hintCell = findMove();
+  score = Math.max(0, score - 20); updateUI();
+};
+document.getElementById('newBtn').onclick = () => { if (!busy) startGame(); };
+
+startGame();
+render();
+</script>
+</body>
+</html>
